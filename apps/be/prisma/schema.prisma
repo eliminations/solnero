@@ -35,4 +35,13 @@ model Transaction {
   
   @@index([userId])
   @@index([txHash])
+  @@index([fromAddress])
+  @@index([toAddress])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model User {
+  @@index([publicKey])
+  @@index([createdAt])
 }

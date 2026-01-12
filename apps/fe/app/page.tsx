@@ -8,10 +8,17 @@ import { Label } from '@/components/ui/label'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { generateWallet, getBalance, type WalletData } from '@/lib/solana'
-import { Shield, Send, Wallet, History, Eye, EyeOff, MessageSquare } from 'lucide-react'
+import { Shield, Send, Wallet, History, Eye, EyeOff, MessageSquare, QrCode } from 'lucide-react'
 import Link from 'next/link'
 import axios from 'axios'
 import { PublicKey } from '@solana/web3.js'
+import { useMemo, useCallback, memo } from 'react'
+import { AddressDisplay } from '@/components/address-display'
+import { QRCodeModal } from '@/components/qr-code-modal'
+import { CopyButton } from '@/components/copy-button'
+import { BalanceSkeleton, TransactionSkeleton } from '@/components/loading-skeleton'
+import { useDebounce } from '@/hooks/useDebounce'
+import { TransactionItem } from '@/components/transaction-item'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
 
@@ -24,7 +31,7 @@ interface Transaction {
   txHash?: string
 }
 
-export default function Home() {
+function Home() {
   const [wallet, setWallet] = useState<WalletData | null>(null)
   const [balance, setBalance] = useState<number>(0)
   const [solPrice, setSolPrice] = useState<number>(0)
@@ -34,7 +41,38 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false)
   const [isBalanceLoading, setIsBalanceLoading] = useState(false)
   const [showPrivateKey, setShowPrivateKey] = useState(false)
+  const [showQRCode, setShowQRCode] = useState(false)
   const [password, setPassword] = useState('')
+  const [transactionPage, setTransactionPage] = useState(1)
+  
+  // Debounce send amount for USD calculation
+  const debouncedAmount = useDebounce(sendAmount, 300)
+  
+  // Memoized USD value
+  const usdValue = useMemo(() => {
+    if (!debouncedAmount || !solPrice) return 0
+    return parseFloat(debouncedAmount) * solPrice
+  }, [debouncedAmount, solPrice])
+  
+  // Memoized balance in USD
+  const balanceUSD = useMemo(() => {
+    return balance * solPrice
+  }, [balance, solPrice])
+  
+  // Poll for transaction updates if there are pending transactions
+  const hasPendingTransactions = useMemo(() => {
+    return transactions.some(tx => tx.status === 'pending')
+  }, [transactions])
+  
+  const handleTransactionUpdate = useCallback((updatedTransactions: Transaction[]) => {
+    setTransactions(updatedTransactions)
+  }, [])
+  
+  useTransactionPolling(
+    wallet?.publicKey || null,
+    handleTransactionUpdate,
+    hasPendingTransactions ? 10000 : 0 // Only poll if there are pending transactions
+  )
 
   useEffect(() => {
     // Load wallet from localStorage
@@ -58,12 +96,14 @@ export default function Home() {
     }
   }, [])
 
-  const loadBalance = async (publicKey: string, showLoading = false) => {
+  const loadBalance = useCallback(async (publicKey: string, showLoading = false) => {
     if (showLoading) setIsBalanceLoading(true)
     try {
       // Try backend API first (more reliable)
       try {
-        const response = await axios.get(`${API_URL}/api/balance/${publicKey}`)
+        const response = await axios.get(`${API_URL}/api/balance/${publicKey}`, {
+          timeout: 10000,
+        })
         if (response.data.success) {
           setBalance(response.data.balance)
           if (showLoading) setIsBalanceLoading(false)
@@ -81,7 +121,7 @@ export default function Home() {
     } finally {
       if (showLoading) setIsBalanceLoading(false)
     }
-  }
+  }, [])
 
   useEffect(() => {
     // Load SOL price for USD conversion
@@ -100,11 +140,15 @@ export default function Home() {
     return () => clearInterval(priceInterval)
   }, [])
 
-  const loadTransactions = async (publicKey: string) => {
+  const loadTransactions = useCallback(async (publicKey: string, page = 1) => {
     try {
-      const response = await axios.get(`${API_URL}/api/transactions/${publicKey}`)
+      const response = await axios.get(`${API_URL}/api/transactions/${publicKey}`, {
+        params: { page, limit: 20 },
+        timeout: 10000,
+      })
       if (response.data.success && Array.isArray(response.data.transactions)) {
         setTransactions(response.data.transactions)
+        setTransactionPage(page)
       } else if (Array.isArray(response.data)) {
         setTransactions(response.data)
       } else {
@@ -114,14 +158,15 @@ export default function Home() {
       console.error('Error loading transactions:', error)
       setTransactions([])
     }
-  }
+  }, []), [])
 
-  const handleCreateWallet = () => {
+  const handleCreateWallet = useCallback(() => {
     const newWallet = generateWallet()
     setWallet(newWallet)
     localStorage.setItem('solnero_wallet', JSON.stringify(newWallet))
     loadBalance(newWallet.publicKey)
-  }
+    loadTransactions(newWallet.publicKey)
+  }, [loadBalance, loadTransactions])
 
   const handleSend = async () => {
     if (!wallet || !sendAmount || !sendTo) return
@@ -313,16 +358,13 @@ export default function Home() {
             <CardContent>
               <div className="space-y-2">
                 {isBalanceLoading ? (
-                  <div className="flex items-center gap-2">
-                    <div className="h-8 w-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin"></div>
-                    <span className="text-muted-foreground/70 text-sm">Loading...</span>
-                  </div>
+                  <BalanceSkeleton />
                 ) : (
                   <>
                     <div className="text-4xl font-bold text-gradient">{balance.toFixed(4)} SOL</div>
                     {solPrice > 0 && (
                       <div className="text-sm text-muted-foreground/70">
-                        ≈ ${(balance * solPrice).toFixed(2)} USD
+                        ≈ ${balanceUSD.toFixed(2)} USD
                       </div>
                     )}
                   </>
@@ -416,20 +458,27 @@ export default function Home() {
                     <span>Recipient Public Key</span>
                     <span className="text-xs text-muted-foreground/50">(Solana address)</span>
                   </Label>
-                  <Input
-                    id="to"
-                    placeholder="GSUT1R98tgjW1mMDRvpC71N7yjBj5umjhx63nWjNFjgU"
-                    value={sendTo}
-                    onChange={(e) => setSendTo(e.target.value)}
-                    className="font-mono text-sm glass border-white/10 h-12 focus:border-primary/50 focus:ring-2 focus:ring-primary/20"
-                  />
+                  <div className="relative">
+                    <Input
+                      id="to"
+                      placeholder="GSUT1R98tgjW1mMDRvpC71N7yjBj5umjhx63nWjNFjgU"
+                      value={sendTo}
+                      onChange={(e) => setSendTo(e.target.value)}
+                      className="font-mono text-sm glass border-white/10 h-12 focus:border-primary/50 focus:ring-2 focus:ring-primary/20 pr-12"
+                    />
+                    {sendTo && (
+                      <div className="absolute right-2 top-1/2 -translate-y-1/2">
+                        <CopyButton text={sendTo} size="sm" variant="ghost" />
+                      </div>
+                    )}
+                  </div>
                 </div>
                 <div className="space-y-3">
                   <Label htmlFor="amount" className="text-sm font-medium flex items-center justify-between">
                     <span>Amount (SOL)</span>
-                    {sendAmount && solPrice > 0 && (
+                    {debouncedAmount && solPrice > 0 && (
                       <span className="text-xs text-muted-foreground/70">
-                        ≈ ${(parseFloat(sendAmount || '0') * solPrice).toFixed(2)} USD
+                        ≈ ${usdValue.toFixed(2)} USD
                       </span>
                     )}
                   </Label>
@@ -506,50 +555,7 @@ export default function Home() {
                 ) : (
                   <div className="space-y-3">
                     {transactions.map((tx) => (
-                      <div
-                        key={tx.id}
-                        className="flex justify-between items-center p-5 glass border-white/10 rounded-lg hover:border-white/20 hover:bg-white/5 transition-all group cursor-pointer"
-                      >
-                        <div className="flex items-center gap-4 flex-1">
-                          <div className={`p-2 rounded-lg ${
-                            tx.type === 'send' 
-                              ? 'bg-red-500/10 border border-red-500/20' 
-                              : 'bg-green-500/10 border border-green-500/20'
-                          }`}>
-                            {tx.type === 'send' ? (
-                              <Send className={`h-4 w-4 ${tx.type === 'send' ? 'text-red-400' : 'text-green-400'}`} />
-                            ) : (
-                              <History className="h-4 w-4 text-green-400" />
-                            )}
-                          </div>
-                          <div className="flex-1">
-                            <div className="font-semibold text-base mb-1">
-                              {tx.type === 'send' ? 'Sent' : 'Received'} {tx.amount.toFixed(4)} SOL
-                            </div>
-                            <div className="text-sm text-muted-foreground/70">
-                              {new Date(tx.timestamp).toLocaleString()}
-                              {tx.txHash && (
-                                <span className="ml-2 font-mono text-xs">
-                                  {tx.txHash.substring(0, 8)}...{tx.txHash.substring(tx.txHash.length - 8)}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="text-sm">
-                          <span
-                            className={`px-3 py-1.5 rounded-full font-medium ${
-                              tx.status === 'confirmed'
-                                ? 'bg-green-500/20 text-green-400 border border-green-500/30'
-                                : tx.status === 'pending'
-                                ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30'
-                                : 'bg-red-500/20 text-red-400 border border-red-500/30'
-                            }`}
-                          >
-                            {tx.status}
-                          </span>
-                        </div>
-                      </div>
+                      <TransactionItem key={tx.id} transaction={tx} />
                     ))}
                   </div>
                 )}
@@ -561,3 +567,5 @@ export default function Home() {
     </div>
   )
 }
+
+export default memo(Home)
