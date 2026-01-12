@@ -1,0 +1,19 @@
+{
+  "name": "solnero",
+  "version": "1.0.0",
+  "description": "Privacy-focused Solana transaction system using zero-knowledge proofs",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently --kill-others --names FE,BE --prefix-colors bgBlue.bold,bgGreen.bold \"pnpm --filter fe dev\" \"pnpm --filter be dev\"",
+    "build": "pnpm --filter fe build && pnpm --filter be build",
+    "setup": "pnpm install"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "chalk": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  }
+}
